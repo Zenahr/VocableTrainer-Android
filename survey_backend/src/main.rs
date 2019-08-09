@@ -17,6 +17,9 @@ mod get;
 mod post;
 mod settings;
 
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
 use db::DbExecutor;
 use get::*;
 use post::*;
@@ -52,7 +55,8 @@ fn main() {
     };
 
     let cpus = num_cpus::get();
-    let pool = init_pool(&settings);
+    let pool = init_pool(&settings, Duration::from_secs(60 * 10));
+    info!("Initialized DB");
     let sys = actix::System::new("survey-backend");
 
     let addr = SyncArbiter::start(cpus, move || DbExecutor(pool.clone()));
@@ -83,24 +87,35 @@ fn main() {
     sys.run();
 }
 
-fn init_pool(settings: &Settings) -> Pool {
+/// Initialize DB pool, retries otherwise panics after retry_times
+fn init_pool(settings: &Settings, retry_duration: Duration) -> Pool {
     trace!("Initializing DB");
-    let mut builder = OptsBuilder::new();
-    builder
-        .ip_or_hostname(Some(settings.database.host.clone()))
-        .db_name(Some(settings.database.database.clone()))
-        .user(Some(settings.database.user.clone()))
-        .pass(Some(settings.database.password.clone()))
-        .tcp_keepalive_time_ms(Some(60_000 * 5))
-        .tcp_port(settings.database.port.clone());
-    let opts: Opts = builder.into();
-    let pool = match Pool::new(opts) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Can't connect to DB: {:?}", e);
-            panic!("Can't connect to DB: {:?}", e);
-        }
+    let sleep_time = match retry_duration.as_secs() / 10 {
+        x if x < 10 => 5,
+        x if x > 30 => 60,
+        x => x,
     };
-    info!("DB initialized");
-    pool
+    let start = Instant::now();
+    while start.elapsed() < retry_duration {
+        let mut builder = OptsBuilder::new();
+        builder
+            .ip_or_hostname(Some(settings.database.host.clone()))
+            .db_name(Some(settings.database.database.clone()))
+            .user(Some(settings.database.user.clone()))
+            .pass(Some(settings.database.password.clone()))
+            .tcp_keepalive_time_ms(Some(60_000 * 5))
+            .tcp_port(settings.database.port.clone());
+        let opts: Opts = builder.into();
+        match Pool::new(opts) {
+            Ok(v) => return v,
+            Err(e) => {
+                error!("Can't connect to DB: {:?}", e);
+            }
+        }
+        sleep(Duration::from_secs(sleep_time));
+    }
+    panic!(
+        "Couldn't connect to DB after {} seconds! Aborting.",
+        retry_duration.as_secs()
+    );
 }
