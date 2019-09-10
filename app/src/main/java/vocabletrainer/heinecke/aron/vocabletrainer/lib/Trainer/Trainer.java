@@ -584,7 +584,7 @@ public class Trainer implements Parcelable {
                     return typе;
                 }
             }
-            return null;
+            throw new IllegalArgumentException("Invalid TEST_MODE value, unknown: "+code);
         }
 
         public int getValue() {

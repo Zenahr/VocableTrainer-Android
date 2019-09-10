@@ -36,6 +36,8 @@ public class Database {
     private final static String DB_NAME_PRODUCTION = "voc.db";
     public final static int MIN_ID_TRESHOLD = 0;
     public final static int ID_RESERVED_SKIP = -2;
+    private final static String TBL_CURRENT_SESSION_STATS = "`session_current_stats`";
+    private final static String TBL_SESSION_STATS = "`session_stats`";
     private final static String TBL_VOCABLE = "`vocables2`";
     private final static String TBL_TABLES = "`voc_tables2`";
     private final static String TBL_SESSION = "`session`";
@@ -55,7 +57,11 @@ public class Database {
     private final static String KEY_CREATED = "`created`";
     private final static String KEY_CORRECT = "`correct`";
     private final static String KEY_WRONG = "`wrong`";
+    private final static String KEY_HINTS = "`hints`";
+    private final static String KEY_TRAINING_MODE = "`training mode`";
     private final static String KEY_ADDITION = "`addition`";
+    private final static String KEY_DATE = "`date`";
+    private final static String KEY_IS_PREVIOUS = "`is_previous`";
 
     private final static String KEY_POINTS = "`points`";
     private final static String KEY_MKEY = "`key`";
@@ -320,11 +326,11 @@ public class Database {
                 int updated = db.update(TBL_TABLES,values,KEY_TABLE + " = ?",
                         args);
                 if (updated != 1){
-                    throw new SQLException("Update error, updated: "+updated);
+                    throw new SQLException("Update error, updated "+updated+"elements, expect 1");
                 }
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "", e);
+                Log.wtf(TAG, "", e);
                 return false;
             }
         } else {
@@ -377,7 +383,7 @@ public class Database {
     /**
      * Update and/or insert all Entries<br>
      * This function uses delete and changed flags in entries<br>
-     *     <u>Does not update vocable metadata such as last used etc on changed flag.</u>
+     * Does <u>not update</u> vocable metadata such as <u>last used</u> etc on changed flag.
      *
      * @param lst
      * @return true on success
@@ -385,6 +391,7 @@ public class Database {
     public boolean upsertEntries(@NonNull final List<VEntry> lst) {
         try (
                 SQLiteStatement delStm = db.compileStatement("DELETE FROM " + TBL_VOCABLE + " WHERE " + KEY_VOC + " = ? AND " + KEY_TABLE + " = ?");
+                SQLiteStatement delStmStats = db.compileStatement("DELETE FROM "+TBL_CURRENT_SESSION_STATS + " WHERE "+ KEY_VOC + " = ? AND " + KEY_TABLE + " = ?");
                 SQLiteStatement updStm = db.compileStatement("UPDATE " + TBL_VOCABLE + " SET " + KEY_ADDITION + " = ?," + KEY_TIP + " = ?"
                         + "WHERE " + KEY_TABLE + "= ? AND " + KEY_VOC + " = ?");
                 SQLiteStatement insStm = db.compileStatement("INSERT INTO " + TBL_VOCABLE + " ("
@@ -417,10 +424,16 @@ public class Database {
                         db.delete(TBL_MEANING_A, whereDelMeaning, args);
 
                         if (entry.isDelete()) {
+                            // delete entry itself
                             delStm.clearBindings();
                             delStm.bindLong(1, entry.getId());
                             delStm.bindLong(2, entry.getList().getId());
                             delStm.execute();
+                            // delete statistics entry
+                            delStmStats.clearBindings();
+                            delStmStats.bindLong(1, entry.getId());
+                            delStmStats.bindLong(2, entry.getList().getId());
+                            delStmStats.execute();
                         } else if (entry.isChanged()) {
                             updStm.clearBindings();
                             updStm.bindString(1, entry.getAddition());
@@ -487,7 +500,7 @@ public class Database {
 
     /**
      * Returns the ID of a table with the exact same naming <br>
-     * this also updates the VList element itself to contains the right ID
+     * this also updates the VList element itself to contain the right ID
      *
      * @param tbl VList to be used a search source
      * @return ID or  -1 if not found, -2 if an error occurred
@@ -575,6 +588,7 @@ public class Database {
             String[] arg = new String[]{String.valueOf(tbl.getId())};
             emptyList_(arg);
             db.delete(TBL_TABLES, KEY_TABLE + " = ?", arg);
+            db.delete(TBL_CURRENT_SESSION_STATS, KEY_TABLE+ " = ?",arg);
             db.setTransactionSuccessful();
             return true;
         } catch (Exception e) {
@@ -600,6 +614,7 @@ public class Database {
         db.delete(TBL_VOCABLE, KEY_TABLE + " = ?", arg);
         db.delete(TBL_MEANING_B, KEY_TABLE + " = ?",arg);
         db.delete(TBL_MEANING_A, KEY_TABLE + " = ?",arg);
+        db.delete(TBL_CURRENT_SESSION_STATS, KEY_TABLE + " = ?", arg);
     }
 
     /**
@@ -626,7 +641,24 @@ public class Database {
     }
 
     /**
+     * Swap session statistics, making current data previous, dropping previous data<br>
+     * <u>does not handle any transactions</u>
+     *
+     * @return
+     */
+    private void swapSessionStatistics_() {
+        // delete prevous
+        db.delete(TBL_CURRENT_SESSION_STATS, KEY_IS_PREVIOUS + " = 1", null);
+        // mark current as previous
+        ContentValues values = new ContentValues();
+        values.put(KEY_IS_PREVIOUS,1);
+        db.update(TBL_CURRENT_SESSION_STATS,values, KEY_IS_PREVIOUS+" = 0 ", null );
+        db.setTransactionSuccessful();
+    }
+
+    /**
      * Deletes the current session
+     * Does <b>not</b> update <b>TBL_CURRENT_SESSION_STATS</b>
      *
      * @return
      */
@@ -699,6 +731,7 @@ public class Database {
                     Log.wtf(TAG, "no new table inserted");
                 }
             }
+            this.swapSessionStatistics_();
             db.setTransactionSuccessful();
             Log.d(TAG, "exit createSession");
             return true;
@@ -946,7 +979,7 @@ public class Database {
 
     @SuppressWarnings("DeprecatedIsStillUsed")
     class internalDB extends SQLiteOpenHelper {
-        private final static int DATABASE_VERSION = 2;
+        private final static int DATABASE_VERSION = 3;
 
         private final String sql_a = "CREATE TABLE " + TBL_TABLES + " ("
                 + KEY_NAME_TBL + " TEXT NOT NULL,"
@@ -991,6 +1024,20 @@ public class Database {
                 + KEY_TABLE + " INTEGER NOT NULL,"
                 + KEY_VOC + " INTEGER NOT NULL,"
                 + "PRIMARY KEY (" + KEY_TABLE + "," + KEY_VOC + "))";
+        private final String sql_k = "CREATE TABLE " + TBL_CURRENT_SESSION_STATS + " ("
+                + KEY_IS_PREVIOUS + " INTEGER NOT NULL,"
+                + KEY_TABLE + " INTEGER NOT NULL,"
+                + KEY_VOC + " INTEGER NOT NULL,"
+                + KEY_HINTS + " INTEGER NOT NULL,"
+                + KEY_CORRECT + " INTEGER NOT NULL,"
+                + KEY_WRONG + " INTEGER NOT NULL,"
+                + "PRIMARY KEY (" + KEY_TABLE + "," + KEY_VOC + "," + KEY_IS_PREVIOUS+ "))";
+        private final String sql_l = "CREATE TABLE "+ TBL_SESSION_STATS + " ("
+                + KEY_DATE + " INTEGER NOT NULL,"
+                + KEY_HINTS + " INTEGER NOT NULL,"
+                + KEY_CORRECT+ " INTEGER NOT NULL,"
+                + KEY_WRONG + " INTEGER NOT NULL,"
+                + "PRIMARY KEY (" + KEY_DATE + "))";
 
         @Deprecated
         private final static String TBL_VOCABLE_V1 = "`vocables`";
@@ -1049,7 +1096,7 @@ public class Database {
         public void onCreate(SQLiteDatabase db) {
             Log.d(TAG,"creating db");
 
-            final String[] tables = {sql_a,sql_b,sql_c,sql_d,sql_e,sql_f,sql_g,sql_h,sql_i,sql_j};
+            final String[] tables = {sql_a,sql_b,sql_c,sql_d,sql_e,sql_f,sql_g,sql_h,sql_i,sql_j,sql_k,sql_l};
             int i = 0;
             db.beginTransaction();
             try {
@@ -1117,6 +1164,11 @@ public class Database {
                 {
                     checkForIllegalIds(db);
                 }
+            }
+            if (oldVersion < 3) {
+                final String[] newTables = {sql_k,sql_l};
+                for(String sql : newTables)
+                    db.execSQL(sql);
             }
             Log.v(TAG,"upgrade end");
         }
